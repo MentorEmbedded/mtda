@@ -52,11 +52,23 @@ sed -i -e 's,command=bash,command=sh,g' ${tmp_dir}/docker.ini
 
 cd ${tmp_dir}
 
-echo "# getting various docker images"
+# Create a docker image with a file filled with zeroes in order to
+# get holes in the resulting .tar image
+cat << EOF > Dockerfile
+FROM rockylinux:9
+RUN dd if=/dev/zero of=/EMPTY bs=1M count=8
+EOF
+
+docker build -t rockylinux .
+rm -f Dockerfile
+
 docker stop mtda-docker >/dev/null 2>&1 || true
-for image in alpine debian ubuntu archlinux almalinux
+for image in alpine debian ubuntu archlinux almalinux rockylinux
 do
-    docker pull ${image} >/dev/null || exit ${?}
+    if [ "${image}" != "rockylinux" ]; then
+        echo "# getting docker image '${image}' ..."
+        docker pull ${image} >/dev/null || exit ${?}
+    fi
     docker rm mtda-docker >/dev/null 2>&1 || true
     docker create --name=mtda-docker ${image} sh >/dev/null
     docker export mtda-docker > ${image}.tar || exit ${?}
@@ -67,6 +79,7 @@ gzip -f debian.tar || exit ${?}
 zstd --rm -f ubuntu.tar || exit ${?}
 bzip2 -f archlinux.tar || exit ${?}
 xz -f almalinux.tar || exit ${?}
+bmaptool create rockylinux.tar > rockylinux.tar.bmap || exit ${?}
 du -sh *.tar*
 
 echo "# starting mtda in the background"

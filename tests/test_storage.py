@@ -29,6 +29,16 @@ def test_write_raw(powered_off):
     assert Console.wait_for("Alpine") is not None
 
 
+def test_write_bmap(powered_off):
+    assert Storage.to_host() is True
+    Storage.write("rockylinux.tar")
+    assert Storage.to_target() is True
+
+    assert Target.on() is True
+    Console.send("cat /etc/os-release\r")
+    assert Console.wait_for("Rocky Linux") is not None
+
+
 def test_write_bz2(powered_off):
     assert Storage.to_host() is True
     Storage.write("archlinux.tar.bz2")
