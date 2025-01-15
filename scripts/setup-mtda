@@ -1,0 +1,175 @@
+#!/bin/bash
+# ---------------------------------------------------------------------------------------------------------------------
+# Setup Multi-Tenant Device Access on system
+# ---------------------------------------------------------------------------------------------------------------------
+#
+# This software is a part of MTDA.
+# Copyright (C) 2022 Siemens Digital Industries Software
+#
+
+# ---------------------------------------------------------------------------------------------------------------------
+# This script shall be run with admin privileges
+# ---------------------------------------------------------------------------------------------------------------------
+
+uid=$(id -u)
+if [ ${uid} -ne 0 ]
+then
+   echo "error: please run this script as root OR using sudo!" >&2
+   exit 1
+fi
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Check distro of running system
+# ---------------------------------------------------------------------------------------------------------------------
+
+dist_name_version() {
+	if [ -f /etc/os-release ]; then
+		DIST=$(cat /etc/os-release | grep ^ID= |  cut -d"=" -f2)
+		# convert dist to lower case
+		DIST=$(echo ${DIST} | tr '[:upper:]' '[:lower:]')
+		case "${DIST}" in
+			rpb*) DIST="oe-rpb" ;;
+		esac
+		if [ "debian" = "$DIST" ]; then
+			DIST_VERSION=$(cat /etc/${DIST}_version)
+		else
+			DIST_VERSION=$(cat /etc/os-release | grep ^VERSION= | awk '{ print $1}' | cut -d'"' -f2)
+		fi
+	fi
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Check supported distro and its version
+# ---------------------------------------------------------------------------------------------------------------------
+dist_name_version
+if [ "debian" = "$DIST" ] && [ $(echo "$DIST_VERSION 10.10" | awk '{print ($1 >= $2)}') ]; then
+	echo "$DIST:$DIST_VERSION is supported distro for MTDA"
+elif [ "ubuntu" = "$DIST" ] && [ $(echo "$DIST_VERSION 20.05" | awk '{print ($1 >= $2)}') ]; then
+	echo "$DIST:$DIST_VERSION is supported distro for MTDA"
+else
+	echo "error:Unsupported distro: MTDA is not yet tested on this distro"
+	exit 1
+fi
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Add apt mirror for MTDA 
+# ---------------------------------------------------------------------------------------------------------------------
+
+add_apt_mirror() {
+    case "${DIST}" in
+        debian)
+			echo 'deb [trusted=yes] https://apt.fury.io/mtda/ /' | \
+				tee /etc/apt/sources.list.d/mtda.list
+        ;;
+        ubuntu)
+			add-apt-repository ppa:chombourger/mtda-focal
+        ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# MTDA and mtda-pytest installation 
+# ---------------------------------------------------------------------------------------------------------------------
+
+mtda_install() {
+	apt-get update
+	apt-get -y install mtda mtda-pytest
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# docker installation 
+# ---------------------------------------------------------------------------------------------------------------------
+
+docker_install() {
+	apt-get -y remove docker docker-engine docker.io containerd runc
+	apt-get update
+	apt-get -y install \
+		ca-certificates \
+		curl \
+		gnupg \
+		lsb-release
+	curl -fsSL https://download.docker.com/linux/$DIST/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+	echo \
+	"deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/$DIST \
+	$(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+	apt-get update
+	apt-get -y install docker-ce docker-ce-cli containerd.io  
+	/sbin/adduser $USER docker
+	systemctl enable docker
+	systemctl start docker
+}
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# mtda-kvm installation 
+# ---------------------------------------------------------------------------------------------------------------------
+
+mtda_kvm_install() {
+	apt-get -y install mtda-kvm
+	dpkg -l | grep -i "mtda-kvm"
+	if [ $? -ne 0 ]; then
+		echo "error: mtda-docker installation failed"
+	else
+		echo "mtda-kvm installation is completed"
+		echo "copy debian/mtda-kvm/usr/share/doc/mtda-kvm/examples/mtda.ini to /etc/mtda/config"
+		echo "refer https://github.com/siemens/mtda/blob/master/docs/build.rst for mtda-kvm usage"
+	fi
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# mtda-kvm installation 
+# ---------------------------------------------------------------------------------------------------------------------
+
+mtda_docker_install() {
+	docker_install
+	apt-get -y install mtda-docker
+	dpkg -l | grep -i "mtda-docker"
+	if [ $? -ne 0 ]; then
+		echo "error: mtda-docker installation failed"
+	else
+		echo "mtda-docker installatin is completed"
+		echo "copy debian/mtda-kvm/usr/share/doc/mtda-docker/examples/mtda.ini to /etc/mtda/config"
+		echo "refer https://github.com/siemens/mtda/blob/master/docs/build.rst for mtda-docker usage"
+	fi
+
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Selection of installtion from list
+# ---------------------------------------------------------------------------------------------------------------------
+
+options=("mtda" "mtda-kvm" "mtda-docker" "Select all" "Quit")
+select opt in "${options[@]}"
+do
+    case $opt in
+        "mtda")
+            echo "you choose mtda and mtda-pytest for installation"
+			add_apt_mirror
+			mtda_install
+            ;;
+        "mtda-kvm")
+            echo "you choose mtda-kvm for installation"
+			add_apt_mirror
+			mtda_install
+			mtda_kvm_install
+            ;;
+        "mtda-docker")
+            echo "you choose mtda-kvm for installation"
+			add_apt_mirror
+			mtda_install
+			mtda_docker_install
+            ;;
+        "Select all")
+            echo "you choose all for installation"
+			add_apt_mirror
+			mtda_install
+			mtda_kvm_install
+			mtda_docker_install
+            ;;
+        "Quit")
+            break
+            ;;
+        *) echo "invalid option $REPLY";;
+    esac
+done
