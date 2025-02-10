@@ -9,7 +9,7 @@
 # SPDX-License-Identifier: MIT
 # ---------------------------------------------------------------------------
 
-
+import fcntl
 import os
 import Pyro4
 import random
@@ -26,6 +26,7 @@ import mtda.constants as CONSTS
 
 class Client:
 
+    _lockfile = "/tmp/storage_lock"
     def __init__(self, host=None, session=None, config_files=None,
                  timeout=CONSTS.RPC.TIMEOUT):
         """
@@ -100,20 +101,32 @@ class Client:
     def pastebin_endpoint(self):
         return self._agent.pastebin_endpoint()
 
+    def _acquire_lock(self):
+        self._lock_fd = open(self._lockfile, "w")
+        fcntl.flock(self._lock_fd, fcntl.LOCK_EX)
+
+    def _release_lock(self):
+        fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+        self._lock_fd.close()
+
     def storage_network(self, remote):
-        cmd_nbd = '/usr/sbin/nbd-client'
-        if os.path.exists(cmd_nbd) is False:
-            raise RuntimeError(f'{cmd_nbd} not found')
+        self._acquire_lock()
+        try:
+            cmd_nbd = '/usr/sbin/nbd-client'
+            if os.path.exists(cmd_nbd) is False:
+                raise RuntimeError(f'{cmd_nbd} not found')
 
-        rdev = self._impl.storage_network()
-        if rdev is None:
-            raise RuntimeError('could not put storage on network')
+            rdev = self._impl.storage_network()
+            if rdev is None:
+                raise RuntimeError('could not put storage on network')
 
-        cmd = ['sudo', '/usr/sbin/modprobe', 'nbd']
-        subprocess.check_call(cmd)
+            cmd = ['sudo', '/usr/sbin/modprobe', 'nbd']
+            subprocess.check_call(cmd)
 
-        cmd = ['sudo', cmd_nbd, '-N', 'mtda-storage', remote]
-        subprocess.check_call(cmd)
+            cmd = ['sudo', cmd_nbd, '-N', 'mtda-storage', remote]
+            subprocess.check_call(cmd)
+        finally:
+            self._release_lock()
 
     def storage_open(self):
         tries = 60
@@ -175,58 +188,62 @@ class Client:
         return True
 
     def storage_write_image(self, path, callback=None):
-        blksz = self._agent.blksz
-        impl = self._impl
-        session = self._session
-
-        # Get file handler from specified path
-        file = ImageFile.new(path, impl, session, blksz, callback)
-
-        # Open the shared storage device so we own it
-        # It also prevents us from loading a new bmap file while
-        # another transfer may be on-going
-        self.storage_open()
-
-        # Automatically discover the bmap file
-        bmap = None
-        image_path = file.path()
-        image_size = None
-        while True:
-            bmap_path = image_path + '.bmap'
-            try:
-                bmap = file.bmap(bmap_path)
-                if bmap is not None:
-                    import xml.etree.ElementTree as ET
-
-                    bmap = ET.fromstring(bmap)
-                    print(f"Discovered bmap file '{bmap_path}'")
-                    bmapDict = self.parseBmap(bmap, bmap_path)
-                    self._impl.storage_bmap_dict(bmapDict, self._session)
-                    image_size = bmapDict['ImageSize']
-                    break
-            except Exception:
-                pass
-            image_path, ext = os.path.splitext(image_path)
-            if ext == "":
-                print("No bmap file found at location of image")
-                break
-
+        self._acquire_lock()
         try:
-            # Prepare for download/copy
-            file.prepare(self._data, image_size)
+            blksz = self._agent.blksz
+            impl = self._impl
+            session = self._session
 
-            # Copy image to shared storage
-            file.copy()
+            # Get file handler from specified path
+            file = ImageFile.new(path, impl, session, blksz, callback)
 
-            # Wait for background writes to complete
-            file.flush()
+            # Open the shared storage device so we own it
+            # It also prevents us from loading a new bmap file while
+            # another transfer may be on-going
+            self.storage_open()
 
-        except Exception:
-            raise
+            # Automatically discover the bmap file
+            bmap = None
+            image_path = file.path()
+            image_size = None
+            while True:
+                bmap_path = image_path + '.bmap'
+                try:
+                    bmap = file.bmap(bmap_path)
+                    if bmap is not None:
+                        import xml.etree.ElementTree as ET
+
+                        bmap = ET.fromstring(bmap)
+                        print(f"Discovered bmap file '{bmap_path}'")
+                        bmapDict = self.parseBmap(bmap, bmap_path)
+                        self._impl.storage_bmap_dict(bmapDict, self._session)
+                        image_size = bmapDict['ImageSize']
+                        break
+                except Exception:
+                    pass
+                image_path, ext = os.path.splitext(image_path)
+                if ext == "":
+                    print("No bmap file found at location of image")
+                    break
+
+            try:
+                # Prepare for download/copy
+                file.prepare(self._data, image_size)
+
+                # Copy image to shared storage
+                file.copy()
+
+                # Wait for background writes to complete
+                file.flush()
+
+            except Exception:
+                raise
+            finally:
+                # Storage may be closed now
+                self.storage_close()
+                self._impl.storage_bmap_dict(None, self._session)
         finally:
-            # Storage may be closed now
-            self.storage_close()
-            self._impl.storage_bmap_dict(None, self._session)
+            self._release_lock()
 
     def parseBmap(self, bmap, bmap_path):
         try:
